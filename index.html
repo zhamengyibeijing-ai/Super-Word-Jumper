@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Super Word Jumper - v10.0 Fullscreen</title>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    
+    <style>
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: #222; font-family: 'Press Start 2P', cursive; }
+        
+        #game-container { 
+            position: relative; 
+            width: 100vw; 
+            height: 100vh; 
+            background-color: #6b8cff; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+        }
+        
+        #input-video { display: none; }
+        
+        /* 🔥 修复点1: 画布不再用 CSS 翻转，改为全屏铺满 */
+        canvas { 
+            position: absolute; 
+            top: 0; 
+            left: 0; 
+            width: 100%; 
+            height: 100%; 
+            z-index: 1; 
+        } 
+        
+        #ui-layer { position: absolute; z-index: 10; width: 100%; height: 100%; pointer-events: none; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+        .pixel-card { background: white; border: 4px solid #000; box-shadow: 8px 8px 0px rgba(0,0,0,0.2); border-radius: 16px; padding: 2rem; text-align: center; pointer-events: auto; max-width: 90%; width: 500px; }
+        .pixel-btn { background: #ffce00; border: 4px solid #fff; box-shadow: 4px 4px 0px #b8860b; color: #d32f2f; padding: 15px 30px; font-size: 1.2rem; font-family: 'Press Start 2P', cursive; cursor: pointer; margin-top: 20px; text-transform: uppercase; }
+        .pixel-btn:active { transform: translate(4px, 4px); box-shadow: none; }
+        select { font-family: 'Press Start 2P', cursive; padding: 10px; margin: 10px 0; border: 4px solid #000; width: 100%; }
+        .loading-spinner { width: 50px; height: 50px; background-color: #ffce00; animation: spin 1s infinite linear; margin: 20px auto; }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+        
+        #offline-badge { position: absolute; top: 20px; right: 20px; background: #ff4444; color: white; padding: 10px; border: 2px solid white; display: none; font-size: 12px; z-index: 100; }
+        #score-board { position: absolute; top: 20px; left: 20px; color: white; font-size: 20px; z-index: 5; text-shadow: 2px 2px 0 #000; display: none; }
+        #question-text { position: absolute; bottom: 50px; width: 100%; text-align: center; color: #ffce00; font-size: 24px; z-index: 5; text-shadow: 3px 3px 0 #000; display: none; }
+    </style>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+</head>
+<body>
+
+<div id="offline-badge">⚠️ OFFLINE MODE</div>
+<div id="score-board">SCORE: 0</div>
+<div id="question-text">FIND: APPLE</div>
+
+<div id="game-container">
+    <video id="input-video"></video>
+    <canvas id="output-canvas"></canvas>
+
+    <div id="ui-layer">
+        <div id="menu-screen" class="pixel-card">
+            <h1 style="color:#ff4444; margin-bottom:20px; text-shadow:2px 2px #000;">SUPER WORD JUMPER</h1>
+            <p style="font-size:12px; color:#666; margin-bottom:20px;">v10.0 Fullscreen Fix</p>
+            
+            <div style="text-align:left; font-size:12px;">THEME:</div>
+            <select id="theme-select"><option value="Animals">🦁 Animals</option><option value="Fruits">🍎 Fruits</option></select>
+            <div style="text-align:left; font-size:12px;">LEVEL:</div>
+            <select id="level-select"><option value="1">Level 1</option><option value="2">Level 2</option></select>
+
+            <div style="margin-top:20px;">
+                <input type="password" id="api-key" placeholder="Paste AIza... Key Here" style="width:100%; padding:10px; border:4px solid #000;">
+            </div>
+
+            <button class="pixel-btn" id="start-btn">START GAME</button>
+        </div>
+
+        <div id="loading-screen" class="pixel-card" style="display:none;">
+            <h2>LOADING...</h2>
+            <div class="loading-spinner"></div>
+            <p id="loading-text" style="font-size:12px; margin-top:20px;">Connecting...</p>
+        </div>
+        
+        <div id="result-screen" class="pixel-card" style="display:none;">
+             <h2 style="margin-bottom:20px;">LEVEL CLEAR!</h2>
+             <p>FINAL SCORE: <span id="final-score">0</span></p>
+             <button class="pixel-btn" onclick="location.reload()">PLAY AGAIN</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    // --- 游戏状态 ---
+    const state = { 
+        // 这里的宽高现在由屏幕决定，不再是固定的 640x480
+        width: window.innerWidth, height: window.innerHeight, 
+        bricks: [], particles: [], 
+        isJumping: false, score: 0, 
+        questions: [], currentQIndex: 0, 
+        gameActive: false 
+    };
+    
+    const videoElement = document.getElementById('input-video');
+    const canvasElement = document.getElementById('output-canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+
+    // 🔥 修复点1: 强制设置 Canvas 尺寸为全屏
+    function resizeCanvas() {
+        canvasElement.width = window.innerWidth;
+        canvasElement.height = window.innerHeight;
+        state.width = window.innerWidth;
+        state.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas(); // 初始化执行一次
+
+    const BACKUP_QUESTIONS = [
+        {"word":"Apple", "pronounce":"Apple", "options":["Apple","Car","Dog"], "correctIndex":0},
+        {"word":"Banana", "pronounce":"Banana", "options":["Cat","Banana","Bus"], "correctIndex":1},
+        {"word":"Cat", "pronounce":"Cat", "options":["Pig","Dog","Cat"], "correctIndex":2},
+        {"word":"Dog", "pronounce":"Dog", "options":["Dog","Egg","Fish"], "correctIndex":0},
+        {"word":"Elephant", "pronounce":"Elephant", "options":["Ant","Bear","Elephant"], "correctIndex":2}
+    ];
+
+    function speak(text) {
+        window.speechSynthesis.cancel();
+        const msg = new SpeechSynthesisUtterance(text);
+        msg.lang = 'en-US';
+        window.speechSynthesis.speak(msg);
+    }
+
+    function playSound(type) {
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        if (type === 'coin') {
+            osc.type = 'square'; osc.frequency.setValueAtTime(987, audioCtx.currentTime); osc.frequency.setValueAtTime(1318, audioCtx.currentTime+0.1);
+            gain.gain.setValueAtTime(0.1, audioCtx.currentTime); gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime+0.5);
+            osc.start(); osc.stop(audioCtx.currentTime+0.5);
+        } else {
+            osc.type = 'sawtooth'; osc.frequency.setValueAtTime(150, audioCtx.currentTime); osc.frequency.linearRampToValueAtTime(100, audioCtx.currentTime+0.1);
+            gain.gain.setValueAtTime(0.1, audioCtx.currentTime); gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime+0.3);
+            osc.start(); osc.stop(audioCtx.currentTime+0.3);
+        }
+    }
+
+    class Brick {
+        constructor(x, y, w, h, text, isCorrect) {
+            this.x = x; this.y = y; this.w = w; this.h = h;
+            this.text = text; this.isCorrect = isCorrect;
+            this.active = true; this.color = '#b84e06'; this.offsetY = 0;
+        }
+        draw(ctx) {
+            if(!this.active) return;
+            const dy = this.y + this.offsetY;
+            ctx.fillStyle = this.color; ctx.fillRect(this.x, dy, this.w, this.h);
+            ctx.strokeStyle = '#000'; ctx.lineWidth = 4; ctx.strokeRect(this.x, dy, this.w, this.h);
+            ctx.fillStyle = '#000'; 
+            ctx.fillRect(this.x+4, dy+4, 4, 4); ctx.fillRect(this.x+this.w-8, dy+4, 4, 4);
+            ctx.fillRect(this.x+4, dy+this.h-8, 4, 4); ctx.fillRect(this.x+this.w-8, dy+this.h-8, 4, 4);
+            ctx.fillStyle = '#fff'; ctx.font = '20px "Press Start 2P"'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText(this.text, this.x + this.w/2, dy + this.h/2);
+        }
+        hit() {
+            this.offsetY = -20; setTimeout(() => this.offsetY = 0, 150);
+            if(this.isCorrect) {
+                this.color = '#32cd32'; playSound('coin'); speak("Correct! " + this.text);
+                createParticles(this.x+this.w/2, this.y+this.h/2, '#32cd32');
+                return true;
+            } else {
+                this.color = '#888'; playSound('bump'); speak("Try again");
+                createParticles(this.x+this.w/2, this.y+this.h/2, '#888');
+                return false;
+            }
+        }
+    }
+
+    class Particle {
+        constructor(x, y, color) {
+            this.x = x; this.y = y; this.color = color;
+            this.vx = (Math.random()-0.5)*10; this.vy = (Math.random()-0.5)*10; this.life = 1.0;
+        }
+        update() { this.x += this.vx; this.y += this.vy; this.life -= 0.05; }
+        draw(ctx) {
+            ctx.globalAlpha = this.life; ctx.fillStyle = this.color;
+            ctx.fillRect(this.x, this.y, 8, 8); ctx.globalAlpha = 1.0;
+        }
+    }
+    function createParticles(x, y, color) {
+        for(let i=0; i<15; i++) state.particles.push(new Particle(x, y, color));
+    }
+
+    function setupLevel(index) {
+        if(index >= state.questions.length) {
+            state.gameActive = false;
+            document.getElementById('result-screen').style.display = 'block';
+            document.getElementById('final-score').innerText = state.score;
+            document.getElementById('score-board').style.display = 'none';
+            document.getElementById('question-text').style.display = 'none';
+            return;
+        }
+        const q = state.questions[index];
+        document.getElementById('question-text').innerText = "FIND: " + q.word;
+        speak("Find " + q.word);
+        
+        state.bricks = [];
+        // 🔥 修复点: 砖块布局基于当前屏幕宽度，而不是 640
+        const brickW = state.width * 0.25; // 砖块宽度占屏幕 25%
+        const brickH = 80;
+        const gap = state.width * 0.05; // 间隙占 5%
+        const totalW = 3*brickW + 2*gap;
+        const startX = (state.width - totalW)/2;
+        
+        q.options.forEach((opt, i) => {
+            state.bricks.push(new Brick(startX + i*(brickW+gap), 100, brickW, brickH, opt, i === q.correctIndex));
+        });
+    }
+
+    async function smartFetch(apiKey, theme, level) {
+        const modelName = "models/gemini-1.5-flash"; 
+        const url = `https://generativelanguage.googleapis.com/v1beta/${modelName}:generateContent?key=${apiKey}`;
+        const prompt = `Generate a JSON array of 5 quiz questions for a 7-year-old. Theme: ${theme}. Level: ${level}. Format: [{"word":"Cat", "pronounce":"Cat", "options":["Cat","Dog","Pig"], "correctIndex":0}]. Return ONLY JSON.`;
+        const payload = { contents: [{ parts: [{ text: prompt }] }] };
+
+        for (let i = 0; i < 2; i++) {
+            try {
+                document.getElementById('loading-text').innerText = `Attempt ${i+1}/2: Asking Google...`;
+                const response = await fetch(url, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if (response.status === 503) { await new Promise(r => setTimeout(r, 2000)); continue; }
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                let text = data.candidates[0].content.parts[0].text.replace(/```json/g, '').replace(/```/g, '').trim();
+                return JSON.parse(text);
+            } catch (e) { console.warn("Attempt failed:", e); }
+        }
+        throw new Error("All attempts failed");
+    }
+
+    document.getElementById('start-btn').addEventListener('click', async () => {
+        const apiKey = document.getElementById('api-key').value.trim();
+        const theme = document.getElementById('theme-select').value;
+        const level = document.getElementById('level-select').value;
+
+        document.getElementById('menu-screen').style.display = 'none';
+        document.getElementById('loading-screen').style.display = 'block';
+
+        try {
+            if(!apiKey) throw new Error("No Key");
+            state.questions = await smartFetch(apiKey, theme, level);
+        } catch (e) {
+            console.error("Using Backup", e);
+            state.questions = BACKUP_QUESTIONS;
+            document.getElementById('offline-badge').style.display = 'block';
+        }
+
+        document.getElementById('loading-text').innerText = "Starting Camera...";
+        const camera = new Camera(videoElement, {
+            onFrame: async () => { await pose.send({image: videoElement}); },
+            width: 1280, height: 720 // 提高摄像头请求分辨率
+        });
+        await camera.start();
+
+        document.getElementById('loading-screen').style.display = 'none';
+        document.getElementById('score-board').style.display = 'block';
+        document.getElementById('question-text').style.display = 'block';
+        
+        state.gameActive = true;
+        setupLevel(0);
+    });
+
+    const pose = new Pose({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`});
+    pose.setOptions({modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5});
+    
+    pose.onResults((results) => {
+        // 每次绘制前清空画布
+        canvasCtx.save();
+        canvasCtx.clearRect(0, 0, state.width, state.height);
+        
+        // 🔥 修复点2: 手动翻转背景视频，实现镜像效果
+        canvasCtx.translate(state.width, 0); // 原点移到右上角
+        canvasCtx.scale(-1, 1); // x 轴翻转
+        canvasCtx.drawImage(results.image, 0, 0, state.width, state.height); // 绘制视频
+        canvasCtx.restore(); // 恢复正常坐标系（用于绘制文字和砖块）
+
+        if(!state.gameActive) return;
+
+        if(results.poseLandmarks) {
+            const nose = results.poseLandmarks[0];
+            
+            // 🔥 修复点3: 坐标映射修正
+            // 鼻子坐标 nose.x 在 0-1 之间。
+            // 因为视频被镜像翻转了（左变右），所以坐标计算也要翻转。
+            // 屏幕上的 X = (1 - nose.x) * 屏幕宽度
+            const noseX = (1 - nose.x) * state.width;
+            const noseY = nose.y * state.height;
+
+            // 画玩家 (红鼻子)
+            canvasCtx.fillStyle = 'red'; canvasCtx.beginPath();
+            canvasCtx.arc(noseX, noseY, 20, 0, 2*Math.PI); canvasCtx.fill();
+
+            // 碰撞检测 (现在砖块和鼻子都在同一个正常坐标系下了)
+            state.bricks.forEach(brick => {
+                if(brick.active && noseX > brick.x && noseX < brick.x+brick.w && noseY > brick.y && noseY < brick.y+brick.h+30) {
+                    if(!state.isJumping) {
+                        state.isJumping = true;
+                        const correct = brick.hit();
+                        if(correct) {
+                            state.score += 100; brick.active = false;
+                            setTimeout(() => {
+                                state.currentQIndex++; state.isJumping = false;
+                                setupLevel(state.currentQIndex);
+                            }, 1500);
+                        } else {
+                            state.score = Math.max(0, state.score-10);
+                            setTimeout(() => state.isJumping = false, 500);
+                        }
+                        document.getElementById('score-board').innerText = "SCORE: " + state.score;
+                    }
+                }
+            });
+            if(noseY > 400) state.isJumping = false;
+        }
+
+        // 绘制砖块和粒子 (在正常坐标系下绘制，所以文字是正的)
+        state.bricks.forEach(b => b.draw(canvasCtx));
+        state.particles.forEach((p, i) => {
+            p.update(); p.draw(canvasCtx);
+            if(p.life<=0) state.particles.splice(i,1);
+        });
+    });
+</script>
+</body>
+</html>
